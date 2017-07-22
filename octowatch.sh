@@ -2,19 +2,62 @@
 
 ## Some vars
 
+VERSION="0.3"
 GITHUB_API="https://api.github.com/repos"
 OW_CONFIG_DIR="$HOME/.octowatch.d"
 
-OW_CACHE_DELAY=3600
+# Default delay: 1 day (86400 seconds)
+OW_CACHE_DELAY=86400
 OW_CACHE_FILE="$OW_CONFIG_DIR/cache.json"
+OW_WATCH_FILE="$OW_CONFIG_DIR/watch.lst"
+OW_CONF_FILE="$OW_CONFIG_DIR/config"
 
 if [ ! -d "$OW_CONFIG_DIR" ] ; then
 	mkdir "$OW_CONFIG_DIR"
-elif [ -f "$OW_CONFIG_DIR/config" ] ; then
-	source "$OW_CONFIG_DIR/config"
+elif [ -f "$OW_CONF_FILE" ] ; then
+	source "$OW_CONF_FILE"
 fi
 
 ## Utility functions
+
+setColors() {
+	ncolors=$(tput colors)
+
+	if [ $ncolors -ge 8 ]; then
+		bold="$(tput bold)"
+		underline="$(tput smul)"
+		standout="$(tput smso)"
+		normal="$(tput sgr0)"
+		black="$(tput setaf 0)"
+		red="$(tput setaf 1)"
+		green="$(tput setaf 2)"
+		yellow="$(tput setaf 3)"
+		blue="$(tput setaf 4)"
+		magenta="$(tput setaf 5)"
+		cyan="$(tput setaf 6)"
+		white="$(tput setaf 7)"
+	fi
+}
+
+usage() {
+echo "octowatch $VERSION"
+cat <<EOF
+Usage: octowatch [options] [REPOSITORY] ...
+
+REPOSITORY: directory or current if omitted.
+
+Options:
+  --help	: display command usage
+  --add		: add repository to watch list
+  --list	: show status of watched repositories
+EOF
+}
+
+usage_error() {
+	echo "octowatch: ${1:-'Unexpected Error'}"
+	echo "Try 'octowatch --help' for more information."
+	exit 1
+}
 
 msg() {
 	echo "$1"
@@ -23,6 +66,7 @@ msg() {
 ## Functions
 
 checkWithCache() {
+	cd "$2"
 	current=$(git rev-parse HEAD)
 	cached=$(jq -r '.commit' <<< "$1")
 	if [ "$current" == "$cached" ] ; then
@@ -35,7 +79,7 @@ checkWithCache() {
 refreshCache() {
 	GIT_API="$GITHUB_API/$1"
 	
-	msg "Refresh - using GITHUB API URL: $GIT_API"
+	#msg "Refresh - using GITHUB API URL: $GIT_API"
 
 	COMMIT=$(curl -sSL ${GIT_API}/commits?per_page=1 | jq -r '.[0].sha')
 
@@ -68,7 +112,7 @@ refreshCache() {
 updateCache() {
 	GIT_API="$GITHUB_API/$1"
 	
-	msg "Update - using GITHUB API URL: $GIT_API"
+	#msg "Update - using GITHUB API URL: $GIT_API"
 
 	COMMIT=$(curl -sSL ${GIT_API}/commits?per_page=1 | jq -r '.[0].sha')
 
@@ -108,91 +152,149 @@ getCache() {
 	fi
 }
 
+# $1: Repository PATH
+# $2: filter: "updates"
+printRepoStatus() {
+
+	F_UPDATES=
+	if [ "$2" == "updates" ] ; then
+		F_UPDATES=1
+	fi
+
+	if [ ! -d "$1" ] ; then
+		msg "Invalid directory [$1]. Cannot print status."
+		return 0
+	else
+		repoDir="$1"
+	fi
+
+	cd "$repoDir"
+
+	# Get git remote.origin.url
+	GIT_REMOTE=$(git config --get remote.origin.url)
+	if [ "$?" -ne 0 ] ; then
+		msg "Invalid GIT Repository [$1]"
+		return 1
+	fi
+
+	# Test if git remote is from github
+	if [[ ! "$GIT_REMOTE" == *"github.com"* ]] ; then 
+		msg "Couldn't find a valid Github Repository: $GIT_REMOTE"
+		return 1
+	fi
+
+	# Get full repo name
+	GIT_REPO="${GIT_REMOTE#*github.com/}"
+	GIT_REPO="${GIT_REPO%'.git'}"
+
+	CACHED_DATA="null"
+
+	if [ -f "$OW_CACHE_FILE" ] ; then
+		getCache "$GIT_REPO"
+	else
+		echo '[]' > "$OW_CACHE_FILE"
+	fi
+
+	if [ "$CACHED_DATA" == "null" ] ; then
+		updateCache "$GIT_REPO"
+		getCache "$GIT_REPO"
+	fi
+
+	last_verification=$(jq -r '.verified' <<< "$CACHED_DATA")
+	is_expired=$(( ($(date +%s) - $last_verification) > $OW_CACHE_DELAY ))
+
+	if [ $is_expired -eq 1 ] ; then
+		refreshCache "$GIT_REPO"
+		getCache "$GIT_REPO"
+	fi
+
+	checkWithCache "$CACHED_DATA" "$repoDir"
+
+	if [ $? -eq 0 ] ; then
+		returnStr="[$bold${green}up to date$normal]"
+		if [[ $F_UPDATES ]] ; then
+			return 0
+		fi
+	else
+		returnStr="[$bold${red} outdated $normal]"
+	fi
+
+	echo " $returnStr $repoDir ($GIT_REPO)"
+
+	return 0
+}
+
+showStatus() {
+	
+	if [ ! -f "$OW_WATCH_FILE" ] ; then
+		msg "No watched repository."
+		return 0		
+	fi
+
+	while read -r line || [[ -n "$line" ]]; do
+		printRepoStatus $line $@
+    	done < "$OW_WATCH_FILE"
+	return 0
+}
+
+showUpdates() {
+	showStatus "updates"
+}
+
+#TODO: FIX files command
+
 ## BEGIN SCRIPT
 
-# Get git remote.origin.url
-GIT_REMOTE=$(git config --get remote.origin.url)
-if [ "$?" -ne 0 ] ; then
-	msg "Nothing to watch here!"
-	#msg "No GIT Remote Origin URL."
-	exit 1
+setColors
+
+REPO_DIR='.'
+
+# Flags
+F_ADD=
+
+
+OPTS=$(getopt --shell bash --name octowatch --long add,help,list,updates --options alu -- "$@")
+eval set -- "$OPTS"
+
+# Extract options and arguments
+while true ; do
+	case "$1" in
+		--) shift ; break ;;
+		--help) echo "usage" ; exit 0 ;;
+		--list|-l) showStatus ; exit 0 ;;
+		--updates|-u) showUpdates ; exit 0 ;;
+		-a|--add) F_ADD=1 ; shift ;;
+		*) echo "usage error" ; exit 1  ;;
+	esac
+done
+
+# TODO: set appropriate directory first (and this for all params)
+if [ "$#" -gt 0 ] ; then
+	if [ -d "$1" ] ; then
+		REPO_DIR="$1"
+	else
+		msg "Invalid argument. $1 is not a valid directory."
+	fi
 fi
 
-# Test if git remote is from github
-if [[ ! "$GIT_REMOTE" == *"github.com"* ]] ; then 
-	msg "Couldn't find a valid Github Repository: $GIT_REMOTE"
-	exit 1
+REPO_DIR="$(realpath $REPO_DIR)"
+
+printRepoStatus "$REPO_DIR"
+
+if [ $? -ne 0 ] ; then
+	exit $?
 fi
 
-# Build git API URL
-#GIT_API="https://api.github.com/repos${GIT_REMOTE#*github.com}"
-#GIT_API=${GIT_API%'.git'}
-
-# Get full repo name
-GIT_REPO="${GIT_REMOTE#*github.com/}"
-GIT_REPO="${GIT_REPO%'.git'}"
-
-
-##curl -sSL ${GIT_API}/releases?per_page=1
-#RELEASE=$(curl -sSL ${GIT_API}/releases?per_page=1 | jq -r '.[0].name')
-#
-## Check GIT API call result
-#if [ "$?" -ne 0 ] ; then
-#	msg "Error accessing Github API. [$GIT_API]."
-#	exit 1
-#fi
-#
-#if [ "$RELEASE" == "null" ] ; then
-#	msg "No release found! Fallback to tags.."
-#else
-#	msg "Release: $RELEASE"
-#	exit 0
-#fi
-#
-## TAGS Fallback
-#TAG=$(curl -sSL ${GIT_API}/tags?per_page=1 | jq -r '.[0].name')
-#
-## Check GIT API call result
-#if [ "$?" -ne 0 ] ; then
-#	msg "Error accessing Github API. [$GIT_API]."
-#	exit 1
-#fi
-#
-#if [ "$TAG" == "null" ] ; then
-#	msg "No tag found! Fallback to commits.."
-#else
-#	msg "Tag: $TAG"
-#	exit 0
-#fi
-
-CACHED_DATA="null"
-
-if [ -f "$OW_CACHE_FILE" ] ; then
-	getCache "$GIT_REPO"
-else
-	echo '[]' > "$OW_CACHE_FILE"
-fi
-
-if [ "$CACHED_DATA" == "null" ] ; then
-	updateCache "$GIT_REPO"
-	getCache "$GIT_REPO"
-fi
-
-last_verification=$(jq -r '.verified' <<< "$CACHED_DATA")
-is_expired=$(( ($(date +%s) - $last_verification) > $OW_CACHE_DELAY ))
-
-if [ $is_expired -eq 1 ] ; then
-	refreshCache "$GIT_REPO"
-	getCache "$GIT_REPO"
-fi
-
-checkWithCache "$CACHED_DATA"
-
-if [ $? -eq 0 ] ; then
-	msg "$GIT_REPO is up to date"
-else
-	msg "$GIT_REPO has new stuff"
+# --add switch
+if [[ "$F_ADD" ]] ; then
+	tmpfile=$(mktemp /tmp/octo.XXX)
+	if [ -f "$OW_WATCH_FILE" ] ; then
+		cp "$OW_WATCH_FILE" "$tmpfile"
+	fi
+	echo "$REPO_DIR" >> "$tmpfile"
+	sort "$tmpfile" | uniq > "$OW_WATCH_FILE"
+	rm "$tmpfile"
+	msg "$bold  => Added to watch list. $normal"
 fi
 
 exit 0
-
