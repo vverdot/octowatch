@@ -1,5 +1,15 @@
 #!/bin/bash
 
+##
+# TODO:
+# - do not recheck outdated repos
+# - merge refreshCache and updateCache
+# - add branch support
+# - rework --help message
+# - command to unfollow
+# - display branch in output
+##
+
 ## Some vars
 
 VERSION="0.3"
@@ -8,6 +18,7 @@ OW_CONFIG_DIR="$HOME/.octowatch.d"
 
 # Default delay: 1 day (86400 seconds)
 OW_CACHE_DELAY=86400
+OW_TIMEOUT=5
 OW_CACHE_FILE="$OW_CONFIG_DIR/cache.json"
 OW_WATCH_FILE="$OW_CONFIG_DIR/watch.lst"
 OW_CONF_FILE="$OW_CONFIG_DIR/config"
@@ -17,6 +28,10 @@ if [ ! -d "$OW_CONFIG_DIR" ] ; then
 elif [ -f "$OW_CONF_FILE" ] ; then
     source "$OW_CONF_FILE"
 fi
+
+[[ $https_proxy ]] && export https_proxy
+
+CURL_CMD="curl -sSL -m $OW_TIMEOUT "
 
 ## Utility functions
 
@@ -86,20 +101,27 @@ checkWithCache() {
     cached=$(jq -r '.commit' <<< "$1")
     if [ "$current" == "$cached" ] ; then
         return 0
-    else
-        return 1
     fi
+
+    # Check if working dir is not ahead
+    # git rev-list @ |grep -q "^befb103a12dbc9f2a566c41cdb86b517ec4094bd$"
+    $(git rev-list @ |grep -q \"^$cached\$\")
+
+    return "$?"
 }
 
 refreshCache() {
-    GIT_API="$GITHUB_API/$1"
+    
+    #GIT_API="$GITHUB_API/$1"
+    GIT_API="$GITHUB_API/$1/branches/$2"
 
     #msg "Refresh - using GITHUB API URL: $GIT_API"
 
-    COMMIT=$(curl -sSL ${GIT_API}/commits?per_page=1 | jq -r '.[0].sha')
+    #COMMIT=$($CURL_CMD ${GIT_API}/commits?per_page=1 | jq -r '.[0].sha')
+    COMMIT=$($CURL_CMD ${GIT_API} | jq -r '.commit.sha')
 
     # Check GIT API call result
-    if [ "$?" -ne 0 ] ; then
+    if [ "$?" -ne 0 ] || [ -z "$COMMIT" ] ; then
         msg "Error accessing Github API. [$GIT_API]."
         exit 1
     fi
@@ -109,11 +131,10 @@ refreshCache() {
         exit 1
     fi
 
-
     tmpfile=$(mktemp /tmp/octowatch.XXX)
 
-    jq "(.[] | select(.repository==\"$1\") | .verified) |= \"$(date +%s)\" | \
-        (.[] | select(.repository==\"$1\") | .commit) |= \"$COMMIT\"" "$OW_CACHE_FILE" > "$tmpfile"
+    jq "(.[] | select(.repository==\"$1\" and .branch==\"$2\") | .verified) |= \"$(date +%s)\" | \
+        (.[] | select(.repository==\"$1\" and .branch==\"$2\") | .commit) |= \"$COMMIT\"" "$OW_CACHE_FILE" > "$tmpfile"
 
     if [ $? -eq 0 ] ; then
         cp -f "$tmpfile" "$OW_CACHE_FILE"
@@ -125,11 +146,9 @@ refreshCache() {
 }
 
 updateCache() {
-    GIT_API="$GITHUB_API/$1"
 
-    #msg "Update - using GITHUB API URL: $GIT_API"
-
-    COMMIT=$(curl -sSL ${GIT_API}/commits?per_page=1 | jq -r '.[0].sha')
+    GIT_API="$GITHUB_API/$1/branches/$2"
+    COMMIT=$($CURL_CMD ${GIT_API} | jq -r '.commit.sha')
 
     # Check GIT API call result
     if [ "$?" -ne 0 ] ; then
@@ -145,7 +164,7 @@ updateCache() {
 
     tmpfile=$(mktemp /tmp/octowatch.XXX)
 
-    jsonStr="{\"repository\": \"${1}\",\"verified\": \"$(date +%s)\", \"commit\": \"${COMMIT}\"}"
+    jsonStr="{\"repository\": \"${1}\",\"branch\": \"${2}\",\"verified\": \"$(date +%s)\", \"commit\": \"${COMMIT}\"}"
     jq ". |= (.+ [$jsonStr])" "$OW_CACHE_FILE" > "$tmpfile"
 
     if [ $? -eq 0 ] ; then
@@ -158,7 +177,7 @@ updateCache() {
 }
 
 getCache() {
-    CACHED_DATA=$(jq "[.[] | select(.repository==\"$1\")] | .[0]" "$OW_CACHE_FILE")
+    CACHED_DATA=$(jq "[.[] | select(.repository==\"$1\" and .branch==\"$2\")] | .[0]" "$OW_CACHE_FILE")
 
     # Check parsing problems
     if [ "$CACHED_DATA" == "" ] ; then
@@ -187,6 +206,7 @@ printRepoStatus() {
 
     # Get git remote.origin.url
     GIT_REMOTE=$(git config --get remote.origin.url)
+    GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
     if [ "$?" -ne 0 ] ; then
         msg "Invalid GIT Repository [$1]"
         return 1
@@ -205,22 +225,22 @@ printRepoStatus() {
     CACHED_DATA="null"
 
     if [ -f "$OW_CACHE_FILE" ] ; then
-        getCache "$GIT_REPO"
+        getCache "$GIT_REPO" "$GIT_BRANCH"
     else
         echo '[]' > "$OW_CACHE_FILE"
     fi
 
     if [ "$CACHED_DATA" == "null" ] ; then
-        updateCache "$GIT_REPO"
-        getCache "$GIT_REPO"
+        updateCache "$GIT_REPO" "$GIT_BRANCH"
+        getCache "$GIT_REPO" "$GIT_BRANCH"
     fi
 
     last_verification=$(jq -r '.verified' <<< "$CACHED_DATA")
     is_expired=$(( ($(date +%s) - $last_verification) > $OW_CACHE_DELAY ))
 
     if [ $is_expired -eq 1 ] ; then
-        refreshCache "$GIT_REPO"
-        getCache "$GIT_REPO"
+        refreshCache "$GIT_REPO" "$GIT_BRANCH"
+        getCache "$GIT_REPO" "$GIT_BRANCH"
     fi
 
     checkWithCache "$CACHED_DATA" "$repoDir"
@@ -268,7 +288,7 @@ REPO_DIR='.'
 F_ADD=
 CMD=
 
-OPTS=$(getopt --shell bash --name octowatch --long add,help,list,updates,no-colors --options nlua -- "$@")
+OPTS=$(getopt --shell bash --name octowatch --long add,help,list,updates,no-colors,force --options nluaf -- "$@")
 eval set -- "$OPTS"
 
 # Extract options and arguments
@@ -276,6 +296,7 @@ while true ; do
     case "$1" in
         --) shift ; break ;;
         -n|--no-colors) disableColors ; shift ;;
+        -f|--force) OW_CACHE_DELAY=0 ; shift ;;
         --help) usage ; exit 0 ;;
         --list|-l) CMD="showStatus" ; shift ;;
         --updates|-u) CMD="showUpdates" ; shift ;;
@@ -304,7 +325,7 @@ REPO_DIR="$(realpath $REPO_DIR)"
 printRepoStatus "$REPO_DIR"
 
 if [ $? -ne 0 ] ; then
-    exit $?
+    exit 1
 fi
 
 # --add switch
