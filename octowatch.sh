@@ -17,6 +17,8 @@
 VERSION="0.3"
 GITHUB_API="https://api.github.com/repos"
 OW_CONFIG_DIR="$HOME/.octowatch.d"
+# API type [undefined|github|gitlab]
+API_TYPE="undefined"
 
 # Default delay: 1 day (86400 seconds)
 OW_CACHE_DELAY=86400
@@ -161,6 +163,24 @@ getCache() {
     fi
 }
 
+# $1 repository remote url
+#   + provided by:  git config --get remote.origin.url
+detectAPI() {
+    
+    [ $# -ne 1 ] && return 1;
+
+    GIT_HOST=${1#*//} && GIT_HOST=${GIT_HOST%%/*}
+    
+    if [[ "$GIT_HOST" == *"github.com"* ]] ; then
+        API_TYPE="github"
+    else
+        CURL_REPLY=$(curl -sSL -m 5 https://$GIT_HOST/api/v4/version | jq -r '.message' 2>/dev/null)
+        if [ $? -eq 0 ] && [ "$CURL_REPLY" == "401 Unauthorized" ]; then
+            API_TYPE="gitlab"
+        fi
+    fi
+}
+
 # $1: Repository PATH
 # $2: filter: "updates"
 printRepoStatus() {
@@ -187,11 +207,10 @@ printRepoStatus() {
         return 1
     fi
 
-    # Test if git remote is from github
-    if [[ ! "$GIT_REMOTE" == *"github.com"* ]] ; then
-        msg "Couldn't find a valid Github Repository: $GIT_REMOTE"
-        return 1
-    fi
+    detectAPI $GIT_REMOTE
+    msg "Repository detected [$API_TYPE]"
+
+    # TODO: GIT_REPO Name extraction based on APÏ type
 
     # Get full repo name
     GIT_REPO="${GIT_REMOTE#*github.com/}"

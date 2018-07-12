@@ -8,3 +8,6 @@ git rev-list origin/master..master --count
 git rev-parse @{u}
 git rev-list HEAD
 git rev-list @
+
+# Check API type
+curl -sSL https://git.verdot.fr/api/v4/version
