@@ -115,8 +115,10 @@ checkWithCache() {
 refreshCache() {
     
     GIT_API="$GITHUB_API/$1/branches/$2"
-    F_NEW_ENTRY=${3:0}
-    
+    F_NEW_ENTRY=${3:-0}
+   
+    # TODO: GITLAB COMPAT
+    # wget -O- https://git.verdot.fr/api/v4/projects/vverdot%2Ftools/repository/branches/master | jq -r '.commit.id'
     COMMIT=$($CURL_CMD ${GIT_API} | jq -r '.commit.sha')
 
     # Check GIT API call result
