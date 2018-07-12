@@ -8,6 +8,8 @@
 # - rework --help message
 # - command to unfollow
 # - display branch in output
+# - if repo not found in cache, try re-populate
+# - fix case when a local commit exists (and not yet pushed)
 ##
 
 ## Some vars
@@ -112,12 +114,9 @@ checkWithCache() {
 
 refreshCache() {
     
-    #GIT_API="$GITHUB_API/$1"
     GIT_API="$GITHUB_API/$1/branches/$2"
-
-    #msg "Refresh - using GITHUB API URL: $GIT_API"
-
-    #COMMIT=$($CURL_CMD ${GIT_API}/commits?per_page=1 | jq -r '.[0].sha')
+    F_NEW_ENTRY=${3:0}
+    
     COMMIT=$($CURL_CMD ${GIT_API} | jq -r '.commit.sha')
 
     # Check GIT API call result
@@ -133,39 +132,13 @@ refreshCache() {
 
     tmpfile=$(mktemp /tmp/octowatch.XXX)
 
-    jq "(.[] | select(.repository==\"$1\" and .branch==\"$2\") | .verified) |= \"$(date +%s)\" | \
+    if [ "$F_NEW_ENTRY" == 0 ] ; then
+        jq "(.[] | select(.repository==\"$1\" and .branch==\"$2\") | .verified) |= \"$(date +%s)\" | \
         (.[] | select(.repository==\"$1\" and .branch==\"$2\") | .commit) |= \"$COMMIT\"" "$OW_CACHE_FILE" > "$tmpfile"
-
-    if [ $? -eq 0 ] ; then
-        cp -f "$tmpfile" "$OW_CACHE_FILE"
-        rm "$tmpfile"
-        return 0
+    else
+        jsonStr="{\"repository\": \"${1}\",\"branch\": \"${2}\",\"verified\": \"$(date +%s)\", \"commit\": \"${COMMIT}\"}"
+        jq ". |= (.+ [$jsonStr])" "$OW_CACHE_FILE" > "$tmpfile"
     fi
-
-    return 1
-}
-
-updateCache() {
-
-    GIT_API="$GITHUB_API/$1/branches/$2"
-    COMMIT=$($CURL_CMD ${GIT_API} | jq -r '.commit.sha')
-
-    # Check GIT API call result
-    if [ "$?" -ne 0 ] ; then
-        msg "Error accessing Github API. [$GIT_API]."
-        exit 1
-    fi
-
-    if [ "$COMMIT" == "null" ] ; then
-        msg "No commit found! Aborting."
-        exit 1
-    fi
-
-
-    tmpfile=$(mktemp /tmp/octowatch.XXX)
-
-    jsonStr="{\"repository\": \"${1}\",\"branch\": \"${2}\",\"verified\": \"$(date +%s)\", \"commit\": \"${COMMIT}\"}"
-    jq ". |= (.+ [$jsonStr])" "$OW_CACHE_FILE" > "$tmpfile"
 
     if [ $? -eq 0 ] ; then
         cp -f "$tmpfile" "$OW_CACHE_FILE"
@@ -231,7 +204,7 @@ printRepoStatus() {
     fi
 
     if [ "$CACHED_DATA" == "null" ] ; then
-        updateCache "$GIT_REPO" "$GIT_BRANCH"
+        refreshCache "$GIT_REPO" "$GIT_BRANCH" 1
         getCache "$GIT_REPO" "$GIT_BRANCH"
     fi
 

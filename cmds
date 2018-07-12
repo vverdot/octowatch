@@ -1,0 +1,10 @@
+# Useful commands
+
+# Get local and upstream names
+git for-each-ref --format='%(refname:short) %(upstream:short)' refs/heads
+
+# Count how much ahead we are
+git rev-list origin/master..master --count
+git rev-parse @{u}
+git rev-list HEAD
+git rev-list @
